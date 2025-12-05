@@ -1,0 +1,14 @@
+{
+  "name": "slack-notifications-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Slack notifications - check Xcode Cloud build status",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@slack/web-api": "^7.0.0"
+  }
+}
