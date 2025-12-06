@@ -33,7 +33,7 @@ const slack = new WebClient(slackToken);
 const server = new Server(
   {
     name: "slack-notifications",
-    version: "1.0.0",
+    version: "1.1.0",
   },
   {
     capabilities: {
@@ -48,7 +48,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: "check_build_status",
-        description: "Get the latest Xcode Cloud build status from Slack notifications. Returns recent build messages including status, workflow name, and timestamp.",
+        description: "Get the latest Xcode Cloud build status from Slack notifications. Returns recent build messages including status, workflow name, duration, and timestamp.",
         inputSchema: {
           type: "object",
           properties: {
@@ -56,6 +56,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "number",
               description: "Number of recent build messages to retrieve (default: 5, max: 20)",
               default: 5,
+            },
+            workflow: {
+              type: "string",
+              description: "Filter by workflow name (e.g., 'Cuti-E-Admin', 'Nutri-E'). Case-insensitive partial match.",
             },
           },
           required: [],
@@ -154,10 +158,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        const limit = Math.min(args?.limit || 5, 20);
+        const workflowFilter = args?.workflow?.toLowerCase();
+        // Fetch more messages if filtering, to ensure we get enough matches
+        const fetchLimit = workflowFilter ? Math.min((args?.limit || 5) * 4, 100) : Math.min(args?.limit || 5, 20);
         const result = await slack.conversations.history({
           channel: buildChannelId,
-          limit: limit,
+          limit: fetchLimit,
         });
 
         if (!result.messages || result.messages.length === 0) {
@@ -171,8 +177,67 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
+        // Helper function to extract duration from text
+        const extractDuration = (text, attachments) => {
+          // Common patterns for duration in Xcode Cloud messages
+          const patterns = [
+            /duration[:\s]+(\d+)\s*(?:min(?:ute)?s?)?(?:\s*(\d+)\s*(?:sec(?:ond)?s?)?)?/i,
+            /took\s+(\d+)\s*(?:min(?:ute)?s?)?(?:\s*(\d+)\s*(?:sec(?:ond)?s?)?)?/i,
+            /completed\s+in\s+(\d+)\s*(?:min(?:ute)?s?)?(?:\s*(\d+)\s*(?:sec(?:ond)?s?)?)?/i,
+            /(\d+)\s*(?:min(?:ute)?s?)\s*(?:(\d+)\s*(?:sec(?:ond)?s?)?)?/i,
+            /(\d+):(\d+)\s*(?:min)?/i, // MM:SS format
+          ];
+
+          const allText = text + ' ' + (attachments?.map(a => `${a.title || ''} ${a.text || ''}`).join(' ') || '');
+
+          for (const pattern of patterns) {
+            const match = allText.match(pattern);
+            if (match) {
+              const mins = parseInt(match[1]) || 0;
+              const secs = parseInt(match[2]) || 0;
+              const totalSeconds = mins * 60 + secs;
+              return {
+                minutes: mins,
+                seconds: secs,
+                totalSeconds,
+                formatted: mins > 0 ? `${mins}m ${secs}s` : `${secs}s`,
+              };
+            }
+          }
+          return null;
+        };
+
+        // Helper function to extract workflow name
+        const extractWorkflow = (text, attachments) => {
+          // Look for workflow name in text or attachments
+          const allText = text + ' ' + (attachments?.map(a => `${a.title || ''} ${a.text || ''}`).join(' ') || '');
+
+          // Common patterns: "Workflow: Name", title of attachment often contains workflow
+          const patterns = [
+            /workflow[:\s]+([^\n\r,]+)/i,
+            /^([A-Z][a-zA-Z0-9-]+(?:\s+[A-Z][a-zA-Z0-9-]+)*)\s+(?:build|workflow)/i,
+          ];
+
+          for (const pattern of patterns) {
+            const match = allText.match(pattern);
+            if (match) {
+              return match[1].trim();
+            }
+          }
+
+          // Check attachment titles - often contains workflow name
+          if (attachments && attachments.length > 0) {
+            const title = attachments[0].title;
+            if (title && title.length > 0 && title.length < 50) {
+              return title;
+            }
+          }
+
+          return null;
+        };
+
         // Parse build messages - Xcode Cloud messages have specific format
-        const buildMessages = result.messages.map((msg) => {
+        let buildMessages = result.messages.map((msg) => {
           const timestamp = new Date(parseFloat(msg.ts) * 1000).toISOString();
 
           // Try to extract build status from message
@@ -189,9 +254,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             status = "cancelled";
           }
 
+          const workflow = extractWorkflow(text, msg.attachments);
+          const duration = extractDuration(text, msg.attachments);
+
           return {
             timestamp,
             status,
+            workflow,
+            duration,
             text: text.substring(0, 500), // Truncate long messages
             attachments: msg.attachments?.map(a => ({
               title: a.title,
@@ -201,11 +271,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         });
 
+        // Apply workflow filter if specified
+        if (workflowFilter) {
+          buildMessages = buildMessages.filter((msg) => {
+            const workflow = msg.workflow?.toLowerCase() || '';
+            const text = msg.text?.toLowerCase() || '';
+            const attachmentText = msg.attachments?.map(a => `${a.title || ''} ${a.text || ''}`).join(' ').toLowerCase() || '';
+            return workflow.includes(workflowFilter) || text.includes(workflowFilter) || attachmentText.includes(workflowFilter);
+          });
+        }
+
+        // Apply limit after filtering
+        const limit = Math.min(args?.limit || 5, 20);
+        buildMessages = buildMessages.slice(0, limit);
+
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify({ builds: buildMessages }, null, 2),
+              text: JSON.stringify({
+                builds: buildMessages,
+                filter: workflowFilter ? { workflow: args.workflow } : null,
+                count: buildMessages.length,
+              }, null, 2),
             },
           ],
         };
