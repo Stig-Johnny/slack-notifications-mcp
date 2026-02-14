@@ -1,0 +1,171 @@
+name: Auto-merge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+env:
+  COPILOT_WAIT_TIMEOUT: '60'
+
+jobs:
+  auto-merge:
+    name: Auto-merge PR
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      pull-requests: write
+      contents: write
+      actions: write
+      checks: read
+
+    steps:
+      - name: Get PR number
+        id: get-pr
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const pr_number = context.issue.number;
+            core.setOutput('pr_number', pr_number);
+            console.log(`PR #${pr_number}`);
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr_number
+            });
+
+            const hasManualMergeLabel = pr.labels.some(label => label.name === 'manual-merge');
+            if (hasManualMergeLabel) {
+              console.log('PR has manual-merge label, skipping auto-merge');
+              core.setFailed('Manual merge label found');
+            }
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Wait for required checks
+        uses: actions/github-script@v8
+        with:
+          script: |
+            console.log('Waiting for required checks to complete...');
+
+            const pr_number = ${{ steps.get-pr.outputs.pr_number }};
+            const maxWait = 10 * 60 * 1000;
+            const startTime = Date.now();
+            const checkInterval = 10000;
+
+            while (Date.now() - startTime < maxWait) {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr_number
+              });
+
+              const { data: checks } = await github.rest.checks.listForRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: pr.head.sha
+              });
+
+              const currentRunId = process.env.GITHUB_RUN_ID;
+              const requiredChecks = checks.check_runs.filter(check => {
+                const isThisWorkflowRun = check.details_url?.includes(`/runs/${currentRunId}`);
+                return !isThisWorkflowRun;
+              });
+
+              const allComplete = requiredChecks.every(check => check.status === 'completed');
+
+              if (allComplete) {
+                const allPassed = requiredChecks.every(check =>
+                  check.conclusion === 'success' || check.conclusion === 'skipped'
+                );
+
+                if (allPassed) {
+                  console.log('All required checks passed!');
+                  return;
+                } else {
+                  console.log('Some required checks failed');
+                  process.exit(1);
+                }
+              }
+
+              console.log('Checks still running, waiting...');
+              await new Promise(resolve => setTimeout(resolve, checkInterval));
+            }
+
+            console.log('Timeout waiting for checks');
+            process.exit(1);
+
+      - name: Wait for Copilot review
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const timeoutSeconds = parseInt(process.env.COPILOT_WAIT_TIMEOUT) || 30;
+            const timeoutMs = timeoutSeconds * 1000;
+            console.log(`Waiting ${timeoutSeconds} seconds for Copilot review...`);
+            await new Promise(resolve => setTimeout(resolve, timeoutMs));
+            console.log('Wait complete, proceeding to conversation check');
+
+      - name: Check for unresolved conversations
+        id: check-conversations
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const pr_number = ${{ steps.get-pr.outputs.pr_number }};
+            const query = `
+              query($owner: String!, $repo: String!, $prNumber: Int!, $after: String) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $prNumber) {
+                    reviewThreads(first: 50, after: $after) {
+                      nodes {
+                        id
+                        isResolved
+                      }
+                      pageInfo {
+                        hasNextPage
+                        endCursor
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            let allThreads = [];
+            let hasNextPage = true;
+            let after = null;
+
+            while (hasNextPage) {
+              const result = await github.graphql(query, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                prNumber: pr_number,
+                after: after
+              });
+
+              const reviewThreads = result.repository.pullRequest.reviewThreads;
+              allThreads = allThreads.concat(reviewThreads.nodes);
+              hasNextPage = reviewThreads.pageInfo.hasNextPage;
+              after = reviewThreads.pageInfo.endCursor;
+            }
+
+            const unresolvedThreads = allThreads.filter(thread => !thread.isResolved);
+
+            if (unresolvedThreads.length > 0) {
+              console.log(`Found ${unresolvedThreads.length} unresolved conversation(s)`);
+              console.log('Auto-merge blocked until conversations are resolved');
+              core.setFailed('Unresolved conversations exist');
+            } else {
+              console.log('No unresolved conversations');
+            }
+
+      - name: Enable auto-merge
+        if: success()
+        uses: peter-evans/enable-pull-request-automerge@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          pull-request-number: ${{ steps.get-pr.outputs.pr_number }}
+          merge-method: squash
