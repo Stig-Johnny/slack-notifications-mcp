@@ -75,6 +75,15 @@ Add to `~/.mcp.json` (create if it doesn't exist):
 # Exit and restart Claude Code for MCP changes to take effect
 ```
 
+## Environment Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `SLACK_BOT_TOKEN` | Yes | Bot User OAuth Token from OAuth & Permissions (starts with `xoxb-`) |
+| `SLACK_BUILD_CHANNEL_ID` | Yes | Channel ID for build notifications (starts with `C`) |
+
+Both variables must be set — the server will fail to start if either is missing.
+
 ## Usage
 
 Once configured, Claude can use these tools:
