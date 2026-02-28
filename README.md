@@ -10,6 +10,39 @@ MCP server that allows Claude to check Xcode Cloud build status and interact wit
 - **send_message** - Post messages to Slack
 - **list_channels** - List available channels
 
+## Quick Start
+
+1. Create a Slack App at https://api.slack.com/apps
+2. Add bot scopes: `channels:history`, `channels:read`, `chat:write`
+3. Install the app to your workspace and copy the `xoxb-` token
+4. Invite the bot to your channel with `/invite @YourAppName`
+5. Get the channel ID from the Slack URL (`C...` part)
+6. Add the config below to `~/.mcp.json` and restart Claude Code
+
+```json
+{
+  "mcpServers": {
+    "slack-notifications": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/Users/yourname/.claude/mcp-servers/slack-notifications/index.js"],
+      "env": {
+        "SLACK_BOT_TOKEN": "xoxb-your-token-here",
+        "SLACK_BUILD_CHANNEL_ID": "C01234567890"
+      }
+    }
+  }
+}
+```
+
+**Test it works:**
+```bash
+node ~/.claude/mcp-servers/slack-notifications/index.js
+```
+No errors = ready to go.
+
+---
+
 ## Setup
 
 ### 1. Create Slack App
