@@ -7,7 +7,7 @@ on:
 jobs:
   check:
     name: Validate
-    runs-on: ubuntu-latest
+    runs-on: arc-linux-slack-notifications-mcp
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
