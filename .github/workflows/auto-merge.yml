@@ -11,7 +11,7 @@ env:
 jobs:
   auto-merge:
     name: Auto-merge PR
-    runs-on: ubuntu-latest
+    runs-on: arc-linux-slack-notifications-mcp
     if: github.event_name == 'pull_request'
     permissions:
       pull-requests: write
