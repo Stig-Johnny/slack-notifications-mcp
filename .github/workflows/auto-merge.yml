@@ -22,7 +22,7 @@ jobs:
     steps:
       - name: Get PR number
         id: get-pr
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
             const pr_number = context.issue.number;
@@ -47,7 +47,7 @@ jobs:
           fetch-depth: 0
 
       - name: Wait for required checks
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
             console.log('Waiting for required checks to complete...');
@@ -100,7 +100,7 @@ jobs:
             process.exit(1);
 
       - name: Wait for Copilot review
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
             const timeoutSeconds = parseInt(process.env.COPILOT_WAIT_TIMEOUT) || 30;
@@ -111,7 +111,7 @@ jobs:
 
       - name: Check for unresolved conversations
         id: check-conversations
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
             const pr_number = ${{ steps.get-pr.outputs.pr_number }};
@@ -164,8 +164,52 @@ jobs:
 
       - name: Enable auto-merge
         if: success()
-        uses: peter-evans/enable-pull-request-automerge@v3
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          pull-request-number: ${{ steps.get-pr.outputs.pr_number }}
-          merge-method: squash
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = ${{ steps.get-pr.outputs.pr_number }};
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+
+            // Try GraphQL enablePullRequestAutoMerge first
+            try {
+              await github.graphql(`
+                mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
+                  enablePullRequestAutoMerge(input: {
+                    pullRequestId: $pullRequestId,
+                    mergeMethod: $mergeMethod
+                  }) {
+                    pullRequest { autoMergeRequest { enabledAt } }
+                  }
+                }
+              `, {
+                pullRequestId: pr.node_id,
+                mergeMethod: 'SQUASH'
+              });
+              console.log('Auto-merge enabled via GraphQL');
+            } catch (error) {
+              console.log('GraphQL auto-merge failed:');
+              console.log(`  message: ${error.message}`);
+              if (error.status) console.log(`  status: ${error.status}`);
+              if (error.errors) console.log(`  errors: ${JSON.stringify(error.errors)}`);
+
+              // Fallback: direct merge via REST API. This still respects branch
+              // protection rules (required checks, reviews, etc.) so it cannot
+              // bypass protections. Used when auto-merge is not enabled in repo settings.
+              console.log('Falling back to direct merge (REST API respects branch protections)...');
+              try {
+                await github.rest.pulls.merge({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber,
+                  merge_method: 'squash'
+                });
+                console.log('PR merged directly');
+              } catch (mergeErr) {
+                core.setFailed(`Merge failed: ${mergeErr.message}`);
+              }
+            }
