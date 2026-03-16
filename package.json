@@ -9,6 +9,6 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
-    "@slack/web-api": "^7.14.1"
+    "@slack/web-api": "^7.15.0"
   }
 }
