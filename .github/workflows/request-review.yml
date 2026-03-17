@@ -1,0 +1,103 @@
+name: Request Review-E Review
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize, closed]
+    branches: [main]
+
+jobs:
+  request-review:
+    name: Request Review-E
+    runs-on: arc-linux-slack-notifications-mcp
+    if: >-
+      github.event.action != 'closed' &&
+      !github.event.pull_request.draft &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      !contains(github.event.pull_request.labels.*.name, 'manual-merge')
+    permissions:
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Determine review action
+        id: check
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const action = context.payload.action;
+            const pr_author = context.payload.pull_request.user.login;
+
+            if (pr_author === 'review-e-dashecorp') {
+              core.setOutput('should_request', 'false');
+              core.setOutput('is_rerequest', 'false');
+              console.log('PR author is Review-E, skipping');
+              return;
+            }
+
+            if (action === 'synchronize') {
+              const reviews = await github.paginate(
+                github.rest.pulls.listReviews,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.payload.pull_request.number,
+                  per_page: 100,
+                }
+              );
+
+              const reviewEReviews = reviews
+                .filter(r => r.user.login === 'review-e-dashecorp')
+                .sort((a, b) => new Date(b.submitted_at) - new Date(a.submitted_at));
+
+              if (reviewEReviews.length > 0 && reviewEReviews[0].state === 'CHANGES_REQUESTED') {
+                core.setOutput('should_request', 'true');
+                core.setOutput('is_rerequest', 'true');
+                console.log('Review-E requested changes — re-requesting review');
+              } else {
+                core.setOutput('should_request', 'false');
+                core.setOutput('is_rerequest', 'false');
+                const latest = reviewEReviews[0]?.state || 'none';
+                console.log(`Synchronize but no CHANGES_REQUESTED from Review-E (latest: ${latest})`);
+              }
+            } else {
+              core.setOutput('should_request', 'true');
+              core.setOutput('is_rerequest', 'false');
+              console.log(`Action: ${action} — requesting fresh review`);
+            }
+
+      - name: Request review from Review-E
+        if: steps.check.outputs.should_request == 'true'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const pr_number = context.payload.pull_request.number;
+
+            try {
+              await github.rest.pulls.requestReviewers({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr_number,
+                reviewers: ['review-e-dashecorp']
+              });
+              console.log(`Requested review from review-e-dashecorp on PR #${pr_number}`);
+            } catch (error) {
+              console.log(`Failed to request review: ${error.message}`);
+            }
+
+  notify-closed:
+    name: Notify PR Closed/Merged
+    runs-on: arc-linux-slack-notifications-mcp
+    if: >-
+      github.event.action == 'closed'
+    permissions:
+      pull-requests: read
+      issues: read
+
+    steps:
+      - name: Log closure
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const merged = pr.merged;
+            console.log(`PR #${pr.number} ${merged ? 'merged' : 'closed'}`);

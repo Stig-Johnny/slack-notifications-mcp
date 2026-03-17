@@ -1,0 +1,229 @@
+name: Auto-resolve Copilot Conversations
+
+on:
+  pull_request_review:
+    types: [submitted]
+  check_suite:
+    types: [completed]
+
+jobs:
+  auto-resolve-copilot-conversations:
+    name: Auto-resolve Copilot Conversations
+    runs-on: arc-linux-slack-notifications-mcp
+    if: |
+      (github.event_name == 'pull_request_review' && contains(github.event.review.user.login, 'copilot')) ||
+      (github.event_name == 'check_suite' && github.event.check_suite.conclusion == 'success')
+    permissions:
+      pull-requests: write
+      contents: read
+      actions: write
+
+    steps:
+      - name: Get PR number
+        id: get-pr
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            let prNumber;
+
+            if (context.eventName === 'pull_request_review') {
+              prNumber = context.issue.number;
+            } else if (context.eventName === 'check_suite') {
+              const { data: prs } = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                head: `${context.repo.owner}:${context.payload.check_suite?.head_branch}`,
+              });
+
+              if (prs.length === 0) {
+                console.log('No open PR found for this check suite');
+                return;
+              }
+
+              prNumber = prs[0].number;
+            }
+
+            core.setOutput('pr_number', prNumber);
+            console.log(`PR number: ${prNumber}`);
+            return prNumber;
+
+      - name: Wait for CI checks to complete
+        if: steps.get-pr.outputs.pr_number
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const prNumber = ${{ steps.get-pr.outputs.pr_number }};
+
+            if (context.eventName === 'check_suite') {
+              console.log('Triggered by completed CI check');
+              return;
+            }
+
+            const maxWait = 5 * 60 * 1000;
+            const startTime = Date.now();
+
+            while (Date.now() - startTime < maxWait) {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber
+              });
+
+              const { data: checks } = await github.rest.checks.listForRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: pr.head.sha
+              });
+
+              const allComplete = checks.check_runs.every(check =>
+                check.status === 'completed'
+              );
+
+              if (allComplete) {
+                const allPassed = checks.check_runs.every(check =>
+                  check.conclusion === 'success' || check.conclusion === 'skipped'
+                );
+
+                if (allPassed) {
+                  console.log('All CI checks passed!');
+                  return;
+                } else {
+                  console.log('Some CI checks failed. Not resolving conversations.');
+                  process.exit(1);
+                }
+              }
+
+              console.log('Waiting for CI checks to complete...');
+              await new Promise(resolve => setTimeout(resolve, 30000));
+            }
+
+            console.log('Timeout waiting for CI checks');
+            process.exit(1);
+
+      - name: Resolve all Copilot review conversations
+        id: resolve-threads
+        if: steps.get-pr.outputs.pr_number
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const prNumber = ${{ steps.get-pr.outputs.pr_number }};
+
+            const query = `
+              query($owner: String!, $repo: String!, $prNumber: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $prNumber) {
+                    reviewThreads(first: 50) {
+                      nodes {
+                        id
+                        isResolved
+                        comments(first: 1) {
+                          nodes {
+                            author {
+                              login
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            const result = await github.graphql(query, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              prNumber: prNumber
+            });
+
+            const unresolvedThreads = result.repository.pullRequest.reviewThreads.nodes
+              .filter(thread =>
+                !thread.isResolved &&
+                thread.comments.nodes[0]?.author?.login.includes('copilot')
+              );
+
+            core.setOutput('resolved_count', unresolvedThreads.length.toString());
+
+            if (unresolvedThreads.length === 0) {
+              console.log('No unresolved Copilot conversations found');
+              return;
+            }
+
+            console.log(`Found ${unresolvedThreads.length} unresolved Copilot conversations`);
+
+            for (const thread of unresolvedThreads) {
+              const mutation = `
+                mutation($threadId: ID!) {
+                  resolveReviewThread(input: {threadId: $threadId}) {
+                    thread {
+                      isResolved
+                    }
+                  }
+                }
+              `;
+
+              await github.graphql(mutation, {
+                threadId: thread.id
+              });
+
+              console.log(`Resolved thread ${thread.id}`);
+            }
+
+            console.log(`Resolved ${unresolvedThreads.length} Copilot conversations`);
+
+      - name: Re-trigger auto-merge after conversation resolution
+        if: steps.get-pr.outputs.pr_number && steps.resolve-threads.outputs.resolved_count != '0'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const prNumber = ${{ steps.get-pr.outputs.pr_number }};
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+
+            if (pr.state !== 'open') {
+              console.log('PR is not open, skipping auto-merge re-trigger');
+              return;
+            }
+
+            const { data: workflows } = await github.rest.actions.listRepoWorkflows({
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+
+            const autoMergeWorkflow = workflows.workflows.find(w => w.name === 'Auto-merge');
+            if (!autoMergeWorkflow) {
+              console.log('Auto-merge workflow not found, skipping re-trigger');
+              return;
+            }
+
+            const { data: runs } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: autoMergeWorkflow.id,
+              head_sha: pr.head.sha,
+              per_page: 5
+            });
+
+            const failedRun = runs.workflow_runs.find(run =>
+              run.status === 'completed' && run.conclusion === 'failure'
+            );
+
+            if (!failedRun) {
+              console.log('No failed auto-merge run found for this SHA');
+              return;
+            }
+
+            console.log(`Re-running failed auto-merge run #${failedRun.id}`);
+
+            await github.rest.actions.reRunWorkflowFailedJobs({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: failedRun.id
+            });
+
+            console.log(`Auto-merge re-triggered for PR #${prNumber}`);
