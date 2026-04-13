@@ -21,7 +21,7 @@ jobs:
     steps:
       - name: Get PR number
         id: get-pr
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             let prNumber;
@@ -50,7 +50,7 @@ jobs:
 
       - name: Wait for CI checks to complete
         if: steps.get-pr.outputs.pr_number
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const prNumber = ${{ steps.get-pr.outputs.pr_number }};
@@ -104,7 +104,7 @@ jobs:
       - name: Resolve all Copilot review conversations
         id: resolve-threads
         if: steps.get-pr.outputs.pr_number
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const prNumber = ${{ steps.get-pr.outputs.pr_number }};
@@ -174,7 +174,7 @@ jobs:
 
       - name: Re-trigger auto-merge after conversation resolution
         if: steps.get-pr.outputs.pr_number && steps.resolve-threads.outputs.resolved_count != '0'
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const prNumber = ${{ steps.get-pr.outputs.pr_number }};
