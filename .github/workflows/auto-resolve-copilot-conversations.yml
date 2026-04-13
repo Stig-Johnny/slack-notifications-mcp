@@ -9,7 +9,7 @@ on:
 jobs:
   auto-resolve-copilot-conversations:
     name: Auto-resolve Copilot Conversations
-    runs-on: arc-linux-slack-notifications-mcp
+    runs-on: ubuntu-latest
     if: |
       (github.event_name == 'pull_request_review' && contains(github.event.review.user.login, 'copilot')) ||
       (github.event_name == 'check_suite' && github.event.check_suite.conclusion == 'success')

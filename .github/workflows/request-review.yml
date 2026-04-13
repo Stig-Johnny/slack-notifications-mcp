@@ -8,7 +8,7 @@ on:
 jobs:
   request-review:
     name: Request Review-E
-    runs-on: arc-linux-slack-notifications-mcp
+    runs-on: ubuntu-latest
     if: >-
       github.event.action != 'closed' &&
       !github.event.pull_request.draft &&
@@ -86,7 +86,7 @@ jobs:
 
   notify-closed:
     name: Notify PR Closed/Merged
-    runs-on: arc-linux-slack-notifications-mcp
+    runs-on: ubuntu-latest
     if: >-
       github.event.action == 'closed'
     permissions:
